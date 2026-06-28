@@ -1,5 +1,6 @@
 "use client";
 
+import { SPORTS, LEVELS, GENDERS } from "../../lib/constants"
 import { useState } from "react";
 import { supabase } from "../../lib/supabase";
 
@@ -68,12 +69,18 @@ export default function CreateActivityPage() {
             value={sport}
             onChange={(e) => setSport(e.target.value)}
           >
-            <option value="running">Running</option>
-            <option value="trail">Trail</option>
-            <option value="bike">Vélo</option>
-            <option value="hiking">Randonnée</option>
-            <option value="tennis">Tennis</option>
-            <option value="surf">Surf</option>
+            {SPORTS.map((sport)=>(
+
+<option
+key={sport.value}
+value={sport.value}
+>
+
+{sport.emoji} {sport.label}
+
+</option>
+
+))}
           </select>
 
           <textarea
@@ -104,9 +111,18 @@ export default function CreateActivityPage() {
             value={level}
             onChange={(e) => setLevel(e.target.value)}
           >
-            <option value="debutant">Débutant</option>
-            <option value="intermediaire">Intermédiaire</option>
-            <option value="confirme">Confirmé</option>
+            {LEVELS.map((level)=>(
+
+<option
+key={level.value}
+value={level.value}
+>
+
+{level.label}
+
+</option>
+
+))}
           </select>
 
           <select
@@ -114,9 +130,18 @@ export default function CreateActivityPage() {
             value={genderFilter}
             onChange={(e) => setGenderFilter(e.target.value)}
           >
-            <option value="all">Tout le monde</option>
-            <option value="women_only">Femmes uniquement</option>
-            <option value="men_only">Hommes uniquement</option>
+            {GENDERS.map((gender) => (
+
+<option
+  key={gender.value}
+  value={gender.value}
+>
+
+{gender.label}
+
+</option>
+
+))}
           </select>
 
           <input
