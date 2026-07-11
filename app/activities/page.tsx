@@ -1,9 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ActivityCard, { type Activity } from "../../components/ActivityCard";
 import ActivityDetailModal from "../../components/ActivityDetailModal";
+import {
+  createSessionToken,
+  fetchLocationSuggestions,
+  formatCitySuggestion,
+  getSuggestionName,
+  getSuggestionSubtitle,
+  retrieveSuggestion,
+  suggestionLabel,
+  type Coordinates,
+  type MapboxSuggestion,
+} from "../../lib/locationSuggestions";
 import { supabase } from "../../lib/supabase";
 
 const SPORT_FILTERS = [
@@ -47,19 +58,7 @@ const LOCATION_FILTERS = [
 ];
 
 const RADIUS_FILTERS = [5, 10, 25, 50, 100];
-const FRENCH_CITY_SEARCH_URL = "https://geo.api.gouv.fr/communes";
-
-type Coordinates = {
-  latitude: number;
-  longitude: number;
-};
-
-type FrenchCommune = {
-  nom: string;
-  centre?: {
-    coordinates: [number, number];
-  };
-};
+const RECENT_PAST_ACTIVITY_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 function isSameDay(firstDate: Date, secondDate: Date) {
   return firstDate.toDateString() === secondDate.toDateString();
@@ -104,15 +103,10 @@ function getDistanceKm(
   );
 }
 
-function buildFrenchCitySearchUrl(query: string) {
-  const url = new URL(FRENCH_CITY_SEARCH_URL);
+function isRecentlyPastActivity(activityDate: Date, now: Date) {
+  const elapsedMs = now.getTime() - activityDate.getTime();
 
-  url.searchParams.set("nom", query);
-  url.searchParams.set("fields", "nom,centre");
-  url.searchParams.set("boost", "population");
-  url.searchParams.set("limit", "1");
-
-  return url;
+  return elapsedMs >= 0 && elapsedMs <= RECENT_PAST_ACTIVITY_WINDOW_MS;
 }
 
 export default function ActivitiesPage() {
@@ -125,6 +119,13 @@ export default function ActivitiesPage() {
   const [selectedLocationMode, setSelectedLocationMode] = useState("all");
   const [selectedRadius, setSelectedRadius] = useState(25);
   const [locationQuery, setLocationQuery] = useState("");
+  const [locationSuggestions, setLocationSuggestions] = useState<
+    MapboxSuggestion[]
+  >([]);
+  const [isLocationSearchOpen, setIsLocationSearchOpen] = useState(false);
+  const [isLocationSearchLoading, setIsLocationSearchLoading] = useState(false);
+  const [locationSearchError, setLocationSearchError] = useState("");
+  const [sessionToken, setSessionToken] = useState(createSessionToken);
   const [userCoordinates, setUserCoordinates] = useState<Coordinates | null>(
     null
   );
@@ -133,6 +134,8 @@ export default function ActivitiesPage() {
   );
   const [locationMessage, setLocationMessage] = useState("");
   const [selectedActivity, setSelectedActivity] = useState<Activity | null>(null);
+  const skipNextLocationFetchRef = useRef(false);
+  const mapboxToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
   useEffect(() => {
     async function fetchActivities() {
@@ -182,6 +185,11 @@ export default function ActivitiesPage() {
       return;
     }
 
+    if (skipNextLocationFetchRef.current) {
+      skipNextLocationFetchRef.current = false;
+      return;
+    }
+
     const query = locationQuery.trim();
 
     if (query.length < 2) {
@@ -190,41 +198,88 @@ export default function ActivitiesPage() {
 
     const controller = new AbortController();
     const timeout = window.setTimeout(async () => {
+      setIsLocationSearchLoading(true);
+      setLocationSearchError("");
+
       try {
-        setLocationMessage("Recherche de la zone...");
-        const response = await fetch(buildFrenchCitySearchUrl(query), {
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error("Zone introuvable.");
-        }
-
-        const communes = (await response.json()) as FrenchCommune[];
-        const commune = communes[0];
-
-        if (!commune?.centre) {
-          throw new Error("Zone introuvable.");
-        }
-
-        const [longitude, latitude] = commune.centre.coordinates;
-        setZoneCoordinates({ latitude, longitude });
-        setLocationMessage(`Zone detectee : ${commune.nom}`);
+        setLocationSuggestions(
+          await fetchLocationSuggestions({
+            query,
+            token: mapboxToken,
+            sessionToken,
+            mode: "zone",
+            proximity: userCoordinates || "ip",
+            signal: controller.signal,
+          })
+        );
+        setIsLocationSearchOpen(true);
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
           return;
         }
 
-        setZoneCoordinates(null);
-        setLocationMessage("Zone introuvable.");
+        setLocationSuggestions([]);
+        setLocationSearchError("Impossible de charger les suggestions.");
+      } finally {
+        setIsLocationSearchLoading(false);
       }
-    }, 350);
+    }, 250);
 
     return () => {
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [locationQuery, selectedLocationMode]);
+  }, [
+    locationQuery,
+    mapboxToken,
+    selectedLocationMode,
+    sessionToken,
+    userCoordinates,
+  ]);
+
+  async function handleLocationSelect(suggestion: MapboxSuggestion) {
+    if (suggestion.feature) {
+      const [longitude, latitude] = suggestion.feature.geometry.coordinates;
+
+      skipNextLocationFetchRef.current = true;
+      setLocationQuery(formatCitySuggestion(suggestion));
+      setZoneCoordinates({ latitude, longitude });
+      setLocationSuggestions([]);
+      setIsLocationSearchOpen(false);
+      setSessionToken(createSessionToken());
+      setLocationMessage(`Zone detectee : ${getSuggestionName(suggestion)}.`);
+      return;
+    }
+
+    if (!mapboxToken || !suggestion.mapbox_id) {
+      setLocationSearchError("Suggestion invalide.");
+      return;
+    }
+
+    setIsLocationSearchLoading(true);
+    setLocationSearchError("");
+
+    try {
+      const feature = await retrieveSuggestion({
+        mapboxId: suggestion.mapbox_id,
+        token: mapboxToken,
+        sessionToken,
+      });
+      const [longitude, latitude] = feature.geometry.coordinates;
+
+      skipNextLocationFetchRef.current = true;
+      setLocationQuery(suggestionLabel(feature.properties || suggestion));
+      setZoneCoordinates({ latitude, longitude });
+      setLocationSuggestions([]);
+      setIsLocationSearchOpen(false);
+      setSessionToken(createSessionToken());
+      setLocationMessage(`Zone detectee : ${getSuggestionName(suggestion)}.`);
+    } catch {
+      setLocationSearchError("Impossible de selectionner cette zone.");
+    } finally {
+      setIsLocationSearchLoading(false);
+    }
+  }
 
   const filteredActivities = useMemo(() => {
     const now = new Date();
@@ -232,6 +287,8 @@ export default function ActivitiesPage() {
     return activities.filter((activity) => {
       const activityDate = new Date(activity.activity_date);
       const isFuture = activityDate > now;
+      const isVisibleByTime =
+        isFuture || isRecentlyPastActivity(activityDate, now);
       const sportOk =
         selectedSport === "all" || activity.sport === selectedSport;
       const levelOk =
@@ -259,7 +316,12 @@ export default function ActivitiesPage() {
         (selectedDate === "weekend" && isThisWeekend(activityDate, now));
 
       return (
-        isFuture && sportOk && levelOk && visibilityOk && dateOk && locationOk
+        isVisibleByTime &&
+        sportOk &&
+        levelOk &&
+        visibilityOk &&
+        dateOk &&
+        locationOk
       );
     });
   }, [
@@ -362,6 +424,9 @@ export default function ActivitiesPage() {
               if (nextMode !== "zone") {
                 setZoneCoordinates(null);
                 setLocationQuery("");
+                setLocationSuggestions([]);
+                setIsLocationSearchOpen(false);
+                setLocationSearchError("");
               }
 
               if (nextMode !== "near_me") {
@@ -380,17 +445,85 @@ export default function ActivitiesPage() {
             ))}
           </select>
 
-          <input
-            className="rounded-xl border border-gray-800 bg-gray-950 px-4 py-3 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-            placeholder="Saisis une ville ou une zone"
-            value={locationQuery}
-            disabled={selectedLocationMode !== "zone"}
-            onChange={(event) => {
-              setLocationQuery(event.target.value);
-              setZoneCoordinates(null);
-              setLocationMessage("");
-            }}
-          />
+          <div className="relative">
+            <input
+              className="w-full rounded-xl border border-gray-800 bg-gray-950 px-4 py-3 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              placeholder="Saisis une ville ou une zone"
+              value={locationQuery}
+              disabled={selectedLocationMode !== "zone"}
+              autoComplete="off"
+              onBlur={() =>
+                window.setTimeout(() => setIsLocationSearchOpen(false), 150)
+              }
+              onChange={(event) => {
+                if (event.target.value.trim().length < 2) {
+                  setLocationSuggestions([]);
+                  setLocationSearchError("");
+                  setIsLocationSearchOpen(false);
+                }
+
+                setLocationQuery(event.target.value);
+                setZoneCoordinates(null);
+                setLocationMessage("");
+                setIsLocationSearchOpen(event.target.value.trim().length >= 2);
+              }}
+              onFocus={() => {
+                if (locationSuggestions.length > 0) {
+                  setIsLocationSearchOpen(true);
+                }
+              }}
+            />
+
+            {isLocationSearchOpen &&
+              (locationSuggestions.length > 0 ||
+                isLocationSearchLoading ||
+                locationSearchError) && (
+                <div className="absolute z-20 mt-2 max-h-80 w-full overflow-auto rounded-xl border border-gray-200 bg-white py-2 text-gray-950 shadow-2xl">
+                  {isLocationSearchLoading && (
+                    <p className="px-5 py-4 text-sm text-gray-500">
+                      Recherche...
+                    </p>
+                  )}
+
+                  {!isLocationSearchLoading &&
+                    locationSuggestions.map((suggestion) => {
+                      const subtitle = getSuggestionSubtitle(suggestion);
+
+                      return (
+                        <button
+                          key={suggestion.mapbox_id}
+                          type="button"
+                          className="flex w-full gap-3 px-5 py-3 text-left transition hover:bg-gray-50 focus:bg-gray-50 focus:outline-none"
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => handleLocationSelect(suggestion)}
+                        >
+                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gray-100 text-gray-700">
+                            {"\u2316"}
+                          </span>
+
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-semibold text-gray-950">
+                              {formatCitySuggestion(suggestion)}
+                            </span>
+
+                            {subtitle && (
+                              <span className="mt-0.5 block truncate text-xs text-gray-500">
+                                {subtitle}
+                              </span>
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+
+                  {!isLocationSearchLoading && locationSearchError && (
+                    <p className="px-5 py-4 text-sm text-red-600">
+                      {locationSearchError}
+                    </p>
+                  )}
+                </div>
+              )}
+          </div>
 
           <select
             className="rounded-xl border border-gray-800 bg-gray-950 px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-500"
@@ -440,6 +573,8 @@ export default function ActivitiesPage() {
               <ActivityCard
                 key={activity.id}
                 activity={activity}
+                disabled={new Date(activity.activity_date) <= new Date()}
+                disabledLabel="Terminee"
                 onSelect={setSelectedActivity}
               />
             ))}

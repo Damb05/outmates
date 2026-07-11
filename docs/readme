@@ -1,0 +1,44 @@
+# Outmates - Progression
+
+## Infrastructure
+
+✅ Next.js
+✅ TypeScript
+✅ GitHub
+✅ Supabase
+✅ Mapbox
+
+## Fonctionnalités
+
+### Activités
+
+✅ Création d'activité
+✅ Liste des activités
+
+### Carte
+
+✅ Marqueurs
+✅ GPS utilisateur
+✅ Filtre Sport
+✅ Filtre Niveau
+✅ Filtre Genre
+✅ Filtre Date
+✅ Filtre Heure
+✅ Filtre Rayon
+
+## Architecture
+
+✅ constants.ts
+⬜ types.ts
+⬜ utils.ts
+
+## À faire
+
+⬜ Recherche ville
+⬜ Recherche code postal
+⬜ Géocodage automatique Mapbox
+⬜ Participants
+⬜ Amis
+⬜ Chat
+⬜ Confiance
+⬜ Notifications

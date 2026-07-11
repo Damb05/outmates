@@ -1,0 +1,72 @@
+# Outmates - Progression
+
+## Infrastructure
+✅ Next.js
+✅ TypeScript
+✅ GitHub
+✅ Supabase
+✅ Mapbox
+
+## Tables Supabase
+✅ profiles
+✅ activities
+✅ participants
+✅ friendships
+
+## Fonctionnalités
+
+### Activités
+✅ création
+✅ liste
+✅ filtres
+
+### Carte
+✅ marqueurs
+✅ GPS utilisateur
+✅ filtre sport
+✅ filtre niveau
+✅ filtre genre
+✅ filtre date
+✅ filtre heure
+✅ filtre rayon
+
+### Architecture
+✅ constants.ts
+⬜ types.ts
+⬜ utils.ts
+
+## À faire
+
+### Carte
+⬜ recherche ville
+⬜ recherche code postal
+⬜ géocodage Mapbox
+⬜ "Autour de moi"
+
+### Social
+⬜ authentification
+⬜ amis
+⬜ demandes d'amis
+⬜ confiance
+⬜ blocage
+⬜ signalements
+
+### Communication
+⬜ chat activité
+⬜ chat amis
+⬜ notifications
+
+## Vision produit
+
+Outmates = plateforme sécurisée pour trouver des partenaires d'activités outdoor.
+
+Valeurs :
+
+- inclusif
+- pas de poids
+- pas de taille
+- sécurité
+- confiance
+- filtres avancés
+- amis
+- activités publiques / privées

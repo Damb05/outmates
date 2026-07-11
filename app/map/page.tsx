@@ -5,15 +5,19 @@ import Map, { Marker, type MapRef } from "react-map-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import ActivityDetailModal from "../../components/ActivityDetailModal";
 import { type Activity, SPORT_META } from "../../components/ActivityCard";
-import { supabase } from "../../lib/supabase";
 import { SPORTS, LEVELS, GENDERS } from "../../lib/constants";
-
-type CitySearchResult = {
-  nom: string;
-  centre?: {
-    coordinates: [number, number];
-  };
-};
+import {
+  createSessionToken,
+  fetchLocationSuggestions,
+  formatCitySuggestion,
+  getSuggestionName,
+  getSuggestionSubtitle,
+  retrieveSuggestion,
+  suggestionLabel,
+  type Coordinates,
+  type MapboxSuggestion,
+} from "../../lib/locationSuggestions";
+import { supabase } from "../../lib/supabase";
 
 const DEFAULT_VIEW_STATE = {
   longitude: 2.35,
@@ -22,7 +26,6 @@ const DEFAULT_VIEW_STATE = {
 };
 
 const RADIUS_OPTIONS = [0, 2, 5, 10, 25, 50];
-const FRENCH_CITY_SEARCH_URL = "https://geo.api.gouv.fr/communes";
 
 function getDistanceKm(
   lat1: number,
@@ -43,17 +46,6 @@ function getDistanceKm(
   return radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function buildCitySearchUrl(query: string) {
-  const url = new URL(FRENCH_CITY_SEARCH_URL);
-
-  url.searchParams.set("nom", query);
-  url.searchParams.set("fields", "nom,centre");
-  url.searchParams.set("boost", "population");
-  url.searchParams.set("limit", "1");
-
-  return url;
-}
-
 export default function MapPage() {
   const mapRef = useRef<MapRef | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -67,7 +59,21 @@ export default function MapPage() {
   const [userLat, setUserLat] = useState<number | null>(null);
   const [userLng, setUserLng] = useState<number | null>(null);
   const [cityQuery, setCityQuery] = useState("");
+  const [citySuggestions, setCitySuggestions] = useState<MapboxSuggestion[]>([]);
+  const [isCitySearchOpen, setIsCitySearchOpen] = useState(false);
+  const [isCitySearchLoading, setIsCitySearchLoading] = useState(false);
+  const [citySearchError, setCitySearchError] = useState("");
+  const [sessionToken, setSessionToken] = useState(createSessionToken);
   const [mapMessage, setMapMessage] = useState("");
+  const skipNextCityFetchRef = useRef(false);
+  const mapboxToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
+  const searchProximity = useMemo<Coordinates | "ip">(
+    () =>
+      userLat !== null && userLng !== null
+        ? { latitude: userLat, longitude: userLng }
+        : "ip",
+    [userLat, userLng]
+  );
 
   useEffect(() => {
     async function fetchActivities() {
@@ -133,7 +139,100 @@ export default function MapPage() {
     });
   }
 
-  async function handleCitySearch() {
+  useEffect(() => {
+    if (skipNextCityFetchRef.current) {
+      skipNextCityFetchRef.current = false;
+      return;
+    }
+
+    const query = cityQuery.trim();
+
+    if (query.length < 2) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(async () => {
+      setIsCitySearchLoading(true);
+      setCitySearchError("");
+
+      try {
+        setCitySuggestions(
+          await fetchLocationSuggestions({
+            query,
+            token: mapboxToken,
+            sessionToken,
+            mode: "zone",
+            proximity: searchProximity,
+            signal: controller.signal,
+          })
+        );
+        setIsCitySearchOpen(true);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return;
+        }
+
+        setCitySuggestions([]);
+        setCitySearchError("Impossible de charger les suggestions.");
+      } finally {
+        setIsCitySearchLoading(false);
+      }
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [cityQuery, mapboxToken, searchProximity, sessionToken]);
+
+  async function handleCitySelect(suggestion: MapboxSuggestion) {
+    if (suggestion.feature) {
+      const [longitude, latitude] = suggestion.feature.geometry.coordinates;
+
+      skipNextCityFetchRef.current = true;
+      setCityQuery(formatCitySuggestion(suggestion));
+      setCitySuggestions([]);
+      setIsCitySearchOpen(false);
+      setSessionToken(createSessionToken());
+      flyTo(longitude, latitude, 12);
+      setMapMessage(`Carte centree sur ${getSuggestionName(suggestion)}.`);
+      return;
+    }
+
+    if (!mapboxToken || !suggestion.mapbox_id) {
+      setCitySearchError("Suggestion invalide.");
+      return;
+    }
+
+    setIsCitySearchLoading(true);
+    setCitySearchError("");
+
+    try {
+      const feature = await retrieveSuggestion({
+        mapboxId: suggestion.mapbox_id,
+        token: mapboxToken,
+        sessionToken,
+      });
+
+      const [longitude, latitude] = feature.geometry.coordinates;
+      const label = suggestionLabel(feature.properties || suggestion);
+
+      skipNextCityFetchRef.current = true;
+      setCityQuery(label);
+      setCitySuggestions([]);
+      setIsCitySearchOpen(false);
+      setSessionToken(createSessionToken());
+      flyTo(longitude, latitude, 12);
+      setMapMessage(`Carte centree sur ${getSuggestionName(suggestion)}.`);
+    } catch {
+      setCitySearchError("Impossible de selectionner cette ville.");
+    } finally {
+      setIsCitySearchLoading(false);
+    }
+  }
+
+  function handleCitySearch() {
     const query = cityQuery.trim();
 
     if (query.length < 2) {
@@ -141,27 +240,14 @@ export default function MapPage() {
       return;
     }
 
-    try {
-      setMapMessage("Recherche de la ville...");
-      const response = await fetch(buildCitySearchUrl(query));
+    const firstSuggestion = citySuggestions[0];
 
-      if (!response.ok) {
-        throw new Error("Ville introuvable.");
-      }
-
-      const results = (await response.json()) as CitySearchResult[];
-      const city = results[0];
-
-      if (!city?.centre) {
-        throw new Error("Ville introuvable.");
-      }
-
-      const [longitude, latitude] = city.centre.coordinates;
-      flyTo(longitude, latitude, 12);
-      setMapMessage(`Carte centree sur ${city.nom}.`);
-    } catch {
-      setMapMessage("Ville introuvable.");
+    if (firstSuggestion) {
+      handleCitySelect(firstSuggestion);
+      return;
     }
+
+    setMapMessage("Choisis une ville dans les suggestions.");
   }
 
   function handleLocateMe() {
@@ -191,25 +277,95 @@ export default function MapPage() {
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-gray-950">
       <div className="absolute left-4 top-4 z-10 flex max-w-[calc(100vw-2rem)] flex-wrap gap-2">
-        <div className="flex overflow-hidden rounded-full bg-white shadow">
-          <input
-            className="w-52 px-4 py-2 text-sm text-gray-950 outline-none placeholder:text-gray-500"
-            placeholder="Chercher une ville"
-            value={cityQuery}
-            onChange={(event) => setCityQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                handleCitySearch();
+        <div className="relative">
+          <div className="flex overflow-hidden rounded-full bg-white shadow">
+            <input
+              className="w-52 px-4 py-2 text-sm text-gray-950 outline-none placeholder:text-gray-500"
+              placeholder="Chercher une ville"
+              value={cityQuery}
+              autoComplete="off"
+              onBlur={() =>
+                window.setTimeout(() => setIsCitySearchOpen(false), 150)
               }
-            }}
-          />
-          <button
-            type="button"
-            className="bg-emerald-500 px-4 py-2 text-sm font-bold text-black transition hover:bg-emerald-400"
-            onClick={handleCitySearch}
-          >
-            OK
-          </button>
+              onChange={(event) => {
+                if (event.target.value.trim().length < 2) {
+                  setCitySuggestions([]);
+                  setCitySearchError("");
+                  setIsCitySearchOpen(false);
+                }
+
+                setCityQuery(event.target.value);
+                setIsCitySearchOpen(event.target.value.trim().length >= 2);
+              }}
+              onFocus={() => {
+                if (citySuggestions.length > 0) {
+                  setIsCitySearchOpen(true);
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  handleCitySearch();
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="bg-emerald-500 px-4 py-2 text-sm font-bold text-black transition hover:bg-emerald-400"
+              onClick={handleCitySearch}
+            >
+              OK
+            </button>
+          </div>
+
+          {isCitySearchOpen &&
+            (citySuggestions.length > 0 ||
+              isCitySearchLoading ||
+              citySearchError) && (
+              <div className="absolute z-20 mt-2 max-h-80 w-72 overflow-auto rounded-xl border border-gray-200 bg-white py-2 text-gray-950 shadow-2xl">
+                {isCitySearchLoading && (
+                  <p className="px-5 py-4 text-sm text-gray-500">
+                    Recherche...
+                  </p>
+                )}
+
+                {!isCitySearchLoading &&
+                  citySuggestions.map((suggestion) => {
+                    const subtitle = getSuggestionSubtitle(suggestion);
+
+                    return (
+                      <button
+                        key={suggestion.mapbox_id}
+                        type="button"
+                        className="flex w-full gap-3 px-5 py-3 text-left transition hover:bg-gray-50 focus:bg-gray-50 focus:outline-none"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => handleCitySelect(suggestion)}
+                      >
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gray-100 text-gray-700">
+                          {"\u2316"}
+                        </span>
+
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-semibold text-gray-950">
+                            {formatCitySuggestion(suggestion)}
+                          </span>
+
+                          {subtitle && (
+                            <span className="mt-0.5 block truncate text-xs text-gray-500">
+                              {subtitle}
+                            </span>
+                          )}
+                        </span>
+                      </button>
+                    );
+                  })}
+
+                {!isCitySearchLoading && citySearchError && (
+                  <p className="px-5 py-4 text-sm text-red-600">
+                    {citySearchError}
+                  </p>
+                )}
+              </div>
+            )}
         </div>
 
         <button

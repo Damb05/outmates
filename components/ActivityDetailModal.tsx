@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   type Activity,
   formatActivityDate,
@@ -9,6 +10,7 @@ import {
   SPORT_META,
   VISIBILITY_LABELS,
 } from "./ActivityCard";
+import { requestToJoinActivity } from "../lib/participation";
 
 type ActivityDetailModalProps = {
   activity: Activity;
@@ -25,6 +27,8 @@ export default function ActivityDetailModal({
   };
   const participantCount =
     activity.participants_count ?? activity.current_participants ?? 0;
+  const [requestMessage, setRequestMessage] = useState("");
+  const [isRequesting, setIsRequesting] = useState(false);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -36,6 +40,16 @@ export default function ActivityDetailModal({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+
+  async function handleRequestJoin() {
+    setIsRequesting(true);
+    setRequestMessage("");
+
+    const result = await requestToJoinActivity(activity);
+
+    setRequestMessage(result.message);
+    setIsRequesting(false);
+  }
 
   return (
     <div
@@ -112,6 +126,12 @@ export default function ActivityDetailModal({
         </div>
 
         <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+          <Link
+            href={`/activities/${activity.id}`}
+            className="rounded-full border border-gray-700 px-6 py-3 text-center font-bold text-white transition hover:border-emerald-500"
+          >
+            Ouvrir la page
+          </Link>
           <button
             type="button"
             className="rounded-full border border-gray-700 px-6 py-3 font-bold text-white transition hover:border-gray-500"
@@ -121,11 +141,19 @@ export default function ActivityDetailModal({
           </button>
           <button
             type="button"
-            className="rounded-full bg-emerald-500 px-6 py-3 font-bold text-black transition hover:bg-emerald-400"
+            className="rounded-full bg-emerald-500 px-6 py-3 font-bold text-black transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isRequesting}
+            onClick={handleRequestJoin}
           >
-            Demander a participer
+            {isRequesting ? "Envoi..." : "Demander à participer"}
           </button>
         </div>
+
+        {requestMessage && (
+          <p className="mt-4 text-right text-sm text-emerald-300">
+            {requestMessage}
+          </p>
+        )}
       </section>
     </div>
   );

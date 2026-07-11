@@ -2,55 +2,24 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SPORTS, LEVELS, GENDERS } from "../../lib/constants";
+import {
+  createSessionToken,
+  expandBbox,
+  fallbackBbox,
+  fetchLocationSuggestions,
+  formatCitySuggestion,
+  getSuggestionName,
+  getSuggestionPostcode,
+  getSuggestionSubtitle,
+  isInsideBbox,
+  retrieveSuggestion,
+  suggestionLabel,
+  type Coordinates,
+  type MapboxFeature,
+  type MapboxSuggestion,
+  type SuggestionMode,
+} from "../../lib/locationSuggestions";
 import { supabase } from "../../lib/supabase";
-
-type Coordinates = {
-  longitude: number;
-  latitude: number;
-};
-
-type MapboxSuggestion = {
-  name: string;
-  name_preferred?: string;
-  mapbox_id?: string;
-  feature_type: string;
-  full_address?: string;
-  place_formatted?: string;
-  source?: "mapbox" | "french-cities";
-  feature?: MapboxFeature;
-  context?: {
-    country?: { country_code?: string; name?: string };
-    region?: { name?: string };
-    postcode?: { name?: string };
-    place?: { name?: string };
-    locality?: { name?: string };
-    neighborhood?: { name?: string };
-  };
-};
-
-type MapboxFeature = {
-  geometry: {
-    coordinates: [number, number];
-  };
-  properties: MapboxSuggestion & {
-    bbox?: [number, number, number, number];
-    coordinates?: {
-      longitude: number;
-      latitude: number;
-    };
-  };
-};
-
-type FrenchCommune = {
-  code: string;
-  nom: string;
-  codesPostaux?: string[];
-  centre?: {
-    coordinates: [number, number];
-  };
-};
-
-type SuggestionMode = "zone" | "point";
 
 type LocationAutocompleteProps = {
   id: string;
@@ -70,187 +39,6 @@ type LocationAutocompleteProps = {
   ) => void;
 };
 
-const MAPBOX_SEARCHBOX_URL = "https://api.mapbox.com/search/searchbox/v1";
-const FRENCH_CITY_SEARCH_URL = "https://geo.api.gouv.fr/communes";
-const FRANCE_BBOX: [number, number, number, number] = [
-  -5.6, 41.2, 9.8, 51.3,
-];
-
-function createSessionToken() {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function formatCoordinates(coordinates: Coordinates) {
-  return `${coordinates.longitude},${coordinates.latitude}`;
-}
-
-function formatBbox(bbox: [number, number, number, number]) {
-  return bbox.join(",");
-}
-
-function fallbackBbox(center: Coordinates): [number, number, number, number] {
-  const latitudeDelta = 0.18;
-  const longitudeDelta =
-    latitudeDelta / Math.max(Math.cos((center.latitude * Math.PI) / 180), 0.25);
-
-  return [
-    center.longitude - longitudeDelta,
-    center.latitude - latitudeDelta,
-    center.longitude + longitudeDelta,
-    center.latitude + latitudeDelta,
-  ];
-}
-
-function expandBbox(
-  bbox: [number, number, number, number],
-  marginRatio = 0.25
-): [number, number, number, number] {
-  const [minLng, minLat, maxLng, maxLat] = bbox;
-  const lngMargin = Math.max((maxLng - minLng) * marginRatio, 0.03);
-  const latMargin = Math.max((maxLat - minLat) * marginRatio, 0.03);
-
-  return [
-    minLng - lngMargin,
-    minLat - latMargin,
-    maxLng + lngMargin,
-    maxLat + latMargin,
-  ];
-}
-
-function isInsideBbox(
-  coordinates: Coordinates,
-  bbox: [number, number, number, number]
-) {
-  const [minLng, minLat, maxLng, maxLat] = bbox;
-
-  return (
-    coordinates.longitude >= minLng &&
-    coordinates.longitude <= maxLng &&
-    coordinates.latitude >= minLat &&
-    coordinates.latitude <= maxLat
-  );
-}
-
-function suggestionLabel(suggestion: MapboxSuggestion) {
-  return (
-    suggestion.full_address ||
-    [suggestion.name_preferred || suggestion.name, suggestion.place_formatted]
-      .filter(Boolean)
-      .join(", ")
-  );
-}
-
-function normalizeSearchText(value: string) {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim();
-}
-
-function getSuggestionName(suggestion: MapboxSuggestion) {
-  return suggestion.name_preferred || suggestion.name;
-}
-
-function getSuggestionPostcode(suggestion: MapboxSuggestion) {
-  const directPostcode = suggestion.context?.postcode?.name;
-
-  if (directPostcode) {
-    return directPostcode;
-  }
-
-  const searchableText = [
-    suggestion.full_address,
-    suggestion.place_formatted,
-    suggestion.name,
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const match = searchableText.match(/\b\d{5}\b/);
-
-  return match?.[0] || "";
-}
-
-function getSuggestionSubtitle(suggestion: MapboxSuggestion) {
-  const parts = [
-    suggestion.context?.place?.name,
-    suggestion.context?.region?.name,
-    suggestion.context?.country?.name,
-  ].filter(Boolean);
-
-  if (parts.length > 0) {
-    return parts.join(", ");
-  }
-
-  return suggestion.place_formatted || "";
-}
-
-function formatCitySuggestion(suggestion: MapboxSuggestion) {
-  const postcode = getSuggestionPostcode(suggestion);
-
-  return `${getSuggestionName(suggestion)}${postcode ? ` (${postcode})` : ""}`;
-}
-
-function rankSuggestions(
-  suggestions: MapboxSuggestion[],
-  query: string,
-  mode: SuggestionMode
-) {
-  const normalizedQuery = normalizeSearchText(query);
-  const typeWeights: Record<string, number> =
-    mode === "zone"
-      ? { place: 80, locality: 70 }
-      : { poi: 55, address: 50, street: 40, neighborhood: 25 };
-
-  return [...suggestions].sort((first, second) => {
-    function score(suggestion: MapboxSuggestion) {
-      const name = normalizeSearchText(getSuggestionName(suggestion));
-      const fullLabel = normalizeSearchText(suggestionLabel(suggestion));
-      let value = typeWeights[suggestion.feature_type] || 0;
-
-      if (mode === "zone" && suggestion.source === "french-cities") {
-        value += 150;
-      }
-
-      if (name === normalizedQuery) {
-        value += 120;
-      } else if (name.startsWith(normalizedQuery)) {
-        value += 90;
-      } else if (name.includes(normalizedQuery)) {
-        value += 55;
-      } else if (fullLabel.includes(normalizedQuery)) {
-        value += 25;
-      }
-
-      if (suggestion.context?.country?.country_code?.toLowerCase() === "fr") {
-        value += 10;
-      }
-
-      return value;
-    }
-
-    return score(second) - score(first);
-  });
-}
-
-function dedupeSuggestions(suggestions: MapboxSuggestion[]) {
-  const seen = new Set<string>();
-
-  return suggestions.filter((suggestion) => {
-    const key = `${normalizeSearchText(getSuggestionName(suggestion))}-${getSuggestionPostcode(suggestion)}`;
-
-    if (seen.has(key)) {
-      return false;
-    }
-
-    seen.add(key);
-    return true;
-  });
-}
 
 function LocationIcon() {
   return (
@@ -270,112 +58,6 @@ function LocationIcon() {
       </svg>
     </span>
   );
-}
-
-function buildSuggestUrl(params: {
-  query: string;
-  token: string;
-  sessionToken: string;
-  mode: SuggestionMode;
-  proximity: Coordinates | "ip";
-  bbox?: [number, number, number, number] | null;
-}) {
-  const url = new URL(`${MAPBOX_SEARCHBOX_URL}/suggest`);
-
-  url.searchParams.set("q", params.query);
-  url.searchParams.set("access_token", params.token);
-  url.searchParams.set("session_token", params.sessionToken);
-  url.searchParams.set("country", "fr");
-  url.searchParams.set("language", "fr");
-  url.searchParams.set("limit", "8");
-  url.searchParams.set(
-    "proximity",
-    params.proximity === "ip" ? "ip" : formatCoordinates(params.proximity)
-  );
-
-  if (params.mode === "zone") {
-    url.searchParams.set("types", "place,locality");
-    url.searchParams.set("bbox", formatBbox(FRANCE_BBOX));
-  } else {
-    url.searchParams.set("types", "poi,address,street,neighborhood");
-
-    if (params.bbox) {
-      url.searchParams.set("bbox", formatBbox(params.bbox));
-    }
-  }
-
-  return url;
-}
-
-function buildFrenchCitySearchUrl(query: string) {
-  const url = new URL(FRENCH_CITY_SEARCH_URL);
-
-  url.searchParams.set("nom", query);
-  url.searchParams.set("fields", "nom,codesPostaux,centre");
-  url.searchParams.set("boost", "population");
-  url.searchParams.set("limit", "8");
-
-  return url;
-}
-
-function communeMatchesQuery(commune: FrenchCommune, query: string) {
-  const normalizedQuery = normalizeSearchText(query);
-  const normalizedName = normalizeSearchText(commune.nom);
-  const postcodes = commune.codesPostaux || [];
-
-  return (
-    normalizedName.includes(normalizedQuery) ||
-    postcodes.some((postcode) => postcode.startsWith(query.trim()))
-  );
-}
-
-function communeToSuggestion(commune: FrenchCommune): MapboxSuggestion | null {
-  if (!commune.centre) {
-    return null;
-  }
-
-  const [longitude, latitude] = commune.centre.coordinates;
-  const postcode = commune.codesPostaux?.[0] || "";
-
-  return {
-    name: commune.nom,
-    name_preferred: commune.nom,
-    mapbox_id: `french-city-${commune.code}`,
-    feature_type: "place",
-    place_formatted: [postcode, "France"].filter(Boolean).join(", "),
-    source: "french-cities",
-    context: {
-      country: { country_code: "fr", name: "France" },
-      postcode: postcode ? { name: postcode } : undefined,
-    },
-    feature: {
-      geometry: { coordinates: [longitude, latitude] },
-      properties: {
-        name: commune.nom,
-        name_preferred: commune.nom,
-        mapbox_id: `french-city-${commune.code}`,
-        feature_type: "place",
-        place_formatted: [postcode, "France"].filter(Boolean).join(", "),
-        context: {
-          country: { country_code: "fr", name: "France" },
-          postcode: postcode ? { name: postcode } : undefined,
-        },
-      },
-    },
-  };
-}
-
-function buildRetrieveUrl(params: {
-  mapboxId: string;
-  token: string;
-  sessionToken: string;
-}) {
-  const url = new URL(`${MAPBOX_SEARCHBOX_URL}/retrieve/${params.mapboxId}`);
-
-  url.searchParams.set("access_token", params.token);
-  url.searchParams.set("session_token", params.sessionToken);
-
-  return url;
 }
 
 function LocationAutocomplete({
@@ -416,7 +98,7 @@ function LocationAutocomplete({
 
     const query = value.trim();
 
-    if (!mapboxToken || query.length < 2) {
+    if (query.length < 2) {
       return;
     }
 
@@ -426,58 +108,16 @@ function LocationAutocomplete({
       setError("");
 
       try {
-        const response = await fetch(
-          buildSuggestUrl({
+        setSuggestions(
+          await fetchLocationSuggestions({
             query,
             token: mapboxToken,
             sessionToken,
             mode,
             proximity,
             bbox: pointSearchBbox,
-          }),
-          { signal: controller.signal }
-        );
-
-        if (!response.ok) {
-          throw new Error("La recherche Mapbox a échoué.");
-        }
-
-        const data = (await response.json()) as {
-          suggestions?: MapboxSuggestion[];
-        };
-
-        let nextSuggestions =
-          mode === "zone"
-            ? (data.suggestions || []).filter((suggestion) =>
-                ["place", "locality"].includes(suggestion.feature_type) &&
-                normalizeSearchText(getSuggestionName(suggestion)).includes(
-                  normalizeSearchText(query)
-                )
-              )
-            : data.suggestions || [];
-
-        if (mode === "zone") {
-          const cityResponse = await fetch(buildFrenchCitySearchUrl(query), {
             signal: controller.signal,
-          });
-
-          if (cityResponse.ok) {
-            const cityData = (await cityResponse.json()) as FrenchCommune[];
-
-            nextSuggestions = [
-              ...cityData
-                .filter((commune) => communeMatchesQuery(commune, query))
-                .map(communeToSuggestion)
-                .filter((suggestion): suggestion is MapboxSuggestion =>
-                  Boolean(suggestion)
-                ),
-              ...nextSuggestions,
-            ];
-          }
-        }
-
-        setSuggestions(
-          rankSuggestions(dedupeSuggestions(nextSuggestions), query, mode)
+          })
         );
         setIsOpen(true);
       } catch (err) {
@@ -531,24 +171,11 @@ function LocationAutocomplete({
         throw new Error("Suggestion Mapbox invalide.");
       }
 
-      const response = await fetch(
-        buildRetrieveUrl({
-          mapboxId: suggestion.mapbox_id,
-          token: mapboxToken,
-          sessionToken,
-        })
-      );
-
-      if (!response.ok) {
-        throw new Error("La récupération du lieu a échoué.");
-      }
-
-      const data = (await response.json()) as { features?: MapboxFeature[] };
-      const feature = data.features?.[0];
-
-      if (!feature) {
-        throw new Error("Aucun lieu récupéré.");
-      }
+      const feature = await retrieveSuggestion({
+        mapboxId: suggestion.mapbox_id,
+        token: mapboxToken,
+        sessionToken,
+      });
 
       const [longitude, latitude] = feature.geometry.coordinates;
       const coordinates = { longitude, latitude };
@@ -726,6 +353,10 @@ export default function CreateActivityPage() {
       return;
     }
 
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
     const { error } = await supabase.from("activities").insert({
       title,
       sport,
@@ -739,6 +370,7 @@ export default function CreateActivityPage() {
       gender_filter: genderFilter,
       max_participants: maxParticipants,
       visibility,
+      organizer_id: user?.id || null,
     });
 
     if (error) {
